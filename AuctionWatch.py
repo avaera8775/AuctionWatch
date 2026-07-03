@@ -656,6 +656,7 @@ _WORLDS = ["Asura", "Bahamut", "Bismarck", "Carbuncle", "Cerberus", "Fenrir",
            "Lakshmi", "Leviathan", "Odin", "Phoenix", "Quetzalcoatl",
            "Ragnarok", "Shiva", "Siren", "Sylph", "Valefor"]
 _DEFAULT_SERVERS = {
+    "Asura": "124.150.154.76",
     "Bahamut": "124.150.154.61",
     "Bismarck": "124.150.154.74",
     "Carbuncle": "124.150.154.64",
@@ -669,9 +670,10 @@ _DEFAULT_SERVERS = {
     "Shiva": "124.150.154.62",
     "Siren": "124.150.154.71",
     "Sylph": "124.150.154.66",
+    "Odin": "124.150.154.69",
     "Valefor": "124.150.154.67",
-    # Asura and Odin are transfer-locked worlds -- use Detect on a
-    # character already there to fill these in.
+    # All 16 live worlds occupy 124.150.154.61-.76. If SE ever renumbers one,
+    # Detect on that world re-reads it and Save overrides the default locally.
 }
 
 

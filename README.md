@@ -48,7 +48,7 @@ python AuctionWatch.py
 **Worlds:**
 - Pick your **World** from the dropdown. With an item open, switching worlds
   re-pulls it live on that server, so you can compare prices across worlds.
-- 14 of the 16 worlds ship with their search-server address already filled in.
+- **All 16 worlds** ship with their search-server address already filled in.
 - **Address / Save / Detect** — if a world's address is missing or ever stops
   working (Square Enix occasionally renumbers them), fix it here:
   - **Detect** (game running, logged into that world): do one in-game `/search`
@@ -59,22 +59,12 @@ python AuctionWatch.py
 
 ---
 
-## Help wanted: Odin & Asura addresses
 
-Every world is pre-filled **except Odin and Asura** — they're transfer-locked, so
-I couldn't park a character on them to read their search-server addresses.
+## Notes & contributing
 
-**If you play on Odin or Asura, please send me that world's address so I can add
-it to the shipped defaults for everyone.** It takes about 20 seconds:
-
-1. Log into your character on **Odin** or **Asura** with the game running.
-2. Do an in-game **`/search`** (or just open the Auction House once). This makes
-   your client connect to that world's search server.
-3. Open **AuctionWatch**, pick that world in the **World** dropdown, and click
-   **Detect**. The **Address** box fills in with the IP (looks like
-   `124.150.154.xx`).
-4. Copy that IP and send it to me, noting which world it's for.
-
-That's it — no logs to dig through, no risk. You can send it however's easiest —
-open an issue or PR at https://github.com/BalladOfWorms/AuctionWatch — and once I
-have both, every world will work out of the box. Thanks!
+All 16 live worlds are included and occupy `124.150.154.61`–`124.150.154.76`.
+Square Enix occasionally renumbers a world's search server; if one ever stops
+returning results, use **Detect** on that world and **Save** to fix it locally.
+If you confirm a changed address, an issue or PR at
+https://github.com/BalladOfWorms/AuctionWatch keeps the shipped defaults current
+for everyone.
