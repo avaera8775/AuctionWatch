@@ -2,6 +2,18 @@
 
 All notable changes to AuctionWatch are documented here.
 
+## [1.0.2] — 2026-07-03
+
+### Added
+
+- **Equipment details** on the item info line — weapons and armor now show their **slot**, **level** (and item level where applicable), a decoded **Jobs** list, and a **Rare / Ex / Rare-Ex** tag.
+- **Right-click a search result** for a menu: **Open on FFXIAH** or **Open on BG-wiki**.
+- **Remembers its layout** — window size/position and column widths persist between runs (saved to `%APPDATA%\AuctionWatch\ui.json`).
+
+### Changed
+
+- **Singles / Stacks filter** on the auction history, with the price summary following the selected filter.
+
 ## [1.0.1] — 2026-07-03
 
 ### Added

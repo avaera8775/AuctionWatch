@@ -640,6 +640,32 @@ def search_items(q, limit=300):
     return hits[:limit]
 
 
+_JOB_ABBR = {1: "WAR", 2: "MNK", 3: "WHM", 4: "BLM", 5: "RDM", 6: "THF",
+             7: "PLD", 8: "DRK", 9: "BST", 10: "BRD", 11: "RNG", 12: "SAM",
+             13: "NIN", 14: "DRG", 15: "SMN", 16: "BLU", 17: "COR", 18: "PUP",
+             19: "DNC", 20: "SCH", 21: "GEO", 22: "RUN"}
+_NJOBS = 22
+_SLOT_NAME = {0: "Main", 1: "Sub", 2: "Range", 3: "Ammo", 4: "Head", 5: "Body",
+              6: "Hands", 7: "Legs", 8: "Feet", 9: "Neck", 10: "Waist",
+              11: "L.Ear", 12: "R.Ear", 13: "L.Ring", 14: "R.Ring", 15: "Back"}
+
+
+def _jobs_str(mask):
+    if not mask:
+        return ""
+    on = [_JOB_ABBR[j] for j in range(1, _NJOBS + 1) if mask & (1 << j)]
+    if len(on) == _NJOBS:
+        return "All jobs"
+    return " ".join(on)
+
+
+def _slot_str(mask):
+    if not mask:
+        return ""
+    txt = "/".join(_SLOT_NAME[s] for s in range(16) if mask & (1 << s))
+    return txt.replace("L.Ear/R.Ear", "Ears").replace("L.Ring/R.Ring", "Rings")
+
+
 def _fmt_ts(ts):
     # local date + time of the sale (the timestamp is a unix epoch)
     try:
@@ -695,6 +721,31 @@ def _load_servers():
     return d
 
 
+def _ui_path():
+    base = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
+                        "AuctionWatch")
+    return os.path.join(base, "ui.json")
+
+
+def _load_ui():
+    try:
+        with open(_ui_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_ui(d):
+    try:
+        p = _ui_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+    except Exception:
+        pass
+
+
 def _save_servers(d):
     try:
         p = _servers_path()
@@ -710,9 +761,16 @@ class AHBrowser(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("AuctionWatch")
-        self.geometry("980x620")
+        self._ui = _load_ui()
         self.configure(bg="#1e1e28")
+        self._ui_save_after = None
         self._build()
+        self.update_idletasks()
+        self.geometry(self._ui.get("geometry", "980x620"))
+        self.bind("<Configure>", self._on_configure)
+        self.tree.bind("<ButtonRelease-1>",
+                       lambda e: self._schedule_ui_save(), add="+")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._cur_id = None
         self._cat_cache = {}   # AH category -> {itemid: (singles, stacks)}
         self._hist_rows = []
@@ -769,6 +827,9 @@ class AHBrowser(tk.Tk):
         self.meta_lbl = tk.Label(right, text="", bg="#1e1e28", fg="#9aa0b2",
                                  anchor="w")
         self.meta_lbl.pack(fill="x", padx=8)
+        self.jobs_lbl = tk.Label(right, text="", bg="#1e1e28", fg="#9ab0d0",
+                                 anchor="w", justify="left", wraplength=560)
+        self.jobs_lbl.pack(fill="x", padx=8)
         self.desc_lbl = tk.Label(right, text="", bg="#1e1e28", fg="#c2c8d6",
                                  anchor="w", justify="left", wraplength=560)
         self.desc_lbl.pack(fill="x", padx=8, pady=(4, 8))
@@ -802,7 +863,8 @@ class AHBrowser(tk.Tk):
                      ("buyer", 115)):
             self.tree.heading(c, text=self._col_titles[c],
                               command=lambda cc=c: self._sort_by(cc))
-            self.tree.column(c, width=w, anchor="w")
+            self.tree.column(c, width=self._ui.get("cols", {}).get(c, w),
+                             anchor="w", stretch=False)
         self.tree.pack(fill="both", expand=True, padx=8, pady=(2, 8))
         body.add(right, minsize=520)
 
@@ -849,15 +911,50 @@ class AHBrowser(tk.Tk):
         _save_servers(self._servers)
         self.status.config(text="saved  %s -> %s" % (w, ip or "(blank)"))
 
+    def _on_configure(self, event):
+        if event.widget is self:
+            self._schedule_ui_save()
+
+    def _schedule_ui_save(self):
+        # debounce: save 700ms after the last resize / column drag
+        if self._ui_save_after is not None:
+            try:
+                self.after_cancel(self._ui_save_after)
+            except Exception:
+                pass
+        self._ui_save_after = self.after(700, self._save_ui_state)
+
+    def _save_ui_state(self):
+        self._ui_save_after = None
+        try:
+            cols = {c: int(self.tree.column(c, "width"))
+                    for c in ("date", "price", "seller", "buyer")}
+            _save_ui({"geometry": self.geometry(), "cols": cols})
+        except Exception:
+            pass
+
+    def _on_close(self):
+        self._save_ui_state()
+        self.destroy()
+
     def _results_rightclick(self, event):
         idx = self.results.nearest(event.y)
         if idx is None or idx < 0 or idx >= len(getattr(self, "_hits", [])):
             return
         self.results.selection_clear(0, "end")
         self.results.selection_set(idx)
-        name, _iid = self._hits[idx]
-        slug = name.replace(" ", "_")
-        webbrowser.open("https://www.bg-wiki.com/ffxi/" + slug)
+        name, iid = self._hits[idx]
+        ffxiah = "https://www.ffxiah.com/item/%d" % iid
+        bgwiki = "https://www.bg-wiki.com/ffxi/" + name.replace(" ", "_")
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Open on FFXIAH",
+                         command=lambda: webbrowser.open(ffxiah))
+        menu.add_command(label="Open on BG-wiki",
+                         command=lambda: webbrowser.open(bgwiki))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _do_search(self):
         self.results.delete(0, "end")
@@ -873,8 +970,22 @@ class AHBrowser(tk.Tk):
         self._cur_id = iid
         it = ITEMS.get(str(iid), {})
         self.name_lbl.config(text=name)
-        self.meta_lbl.config(text=f"id {iid}   ·   {it.get('c','?')}   ·   "
-                                  f"stack {it.get('s',1)}")
+        bits = ["id %d" % iid]
+        if it.get("re"):
+            bits.append(it["re"])
+        sl = _slot_str(it.get("sl", 0))
+        if sl:
+            bits.append(sl)
+        if it.get("lv"):
+            bits.append("Lv %d" % it["lv"])
+        if it.get("il"):
+            bits.append("iLv %d" % it["il"])
+        bits.append(it.get("c", "?"))
+        if it.get("s", 1) > 1:
+            bits.append("stack %d" % it["s"])
+        self.meta_lbl.config(text="   \u00b7   ".join(bits))
+        js = _jobs_str(it.get("j", 0))
+        self.jobs_lbl.config(text=("Jobs:  " + js) if js else "")
         self.desc_lbl.config(text=it.get("d", ""))
         self._refresh_current()
 
