@@ -42,13 +42,21 @@ python AuctionWatch.py
 - **All / Singles / Stacks** buttons — filter the table; the price summary
   (low / med / high) follows the filter so single and stack prices never blend.
 - **On sale now** — how many singles and stacks are currently listed.
+- **Cross-server prices** — with an item open, the left panel ranks every world
+  from cheapest to priciest by its median sale price (cheapest in green,
+  priciest in red), so you can spot the best market at a glance. All worlds are
+  queried at once, so it fills in within a second or two.
 - **Sortable columns** — click any header (Sold, Price, Seller, Buyer) to sort;
   click again to reverse.
 
 **Worlds:**
 - Pick your **World** from the dropdown. With an item open, switching worlds
   re-pulls it live on that server, so you can compare prices across worlds.
+- A strip along the bottom shows the selected world's **live population** (how
+  many characters are online right now), refreshed as you browse.
 - **All 16 worlds** ship with their search-server address already filled in.
+- **Default** — sets the world you're on as the one that opens automatically
+  next launch (also remembers the window size and left-panel width).
 - **Address / Save / Detect** — if a world's address is missing or ever stops
   working (Square Enix occasionally renumbers them), fix it here:
   - **Detect** (game running, logged into that world): do one in-game `/search`

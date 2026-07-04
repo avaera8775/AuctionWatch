@@ -2,6 +2,18 @@
 
 All notable changes to AuctionWatch are documented here.
 
+## [1.0.3] — 2026-07-04
+
+### Added
+
+- **Server population** — a live count of players online on the selected world, shown in a strip along the bottom of the window. It refreshes on launch, when you switch worlds, and when you look up an item. Like the Auction House data, it comes from the search server, so it works without the game running.
+- **Cross-server price comparison** — selecting an item now ranks every world from cheapest to priciest by its **median** sale price, listed in the results panel (cheapest in green, priciest in red). All 16 worlds are queried in parallel, so the list fills in within a second or two, and each item's result is cached for the session.
+- **Default world** — a **Default** button (next to Detect) remembers the current world as the one that opens automatically on launch.
+
+### Changed
+
+- Tidied the top bar — removed the "items loaded" text and the duplicated world/address readout, since both already appear in the toolbar.
+
 ## [1.0.2] — 2026-07-03
 
 ### Added

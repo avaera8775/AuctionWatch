@@ -507,6 +507,161 @@ def _ahsrch_query_category(host, port, cat, timeout=8.0):
             guard += 1
     return {"items": items, "total": total}
 
+
+# ─────────────── player search / server population ───────────────
+# Besides the AH, the search server answers a player-search family (retail
+# /search). For a population readout we don't need the (truncated) record list:
+# every reply carries the TRUE match count as a u16 at 0x0E ("total found, may
+# differ from the amount sent"), and the query behind it has no LIMIT — so one
+# broad search returns the live server population.
+#
+# The request framing is identical to the AH requests above; the only deltas are
+# the type byte (0x03 search / 0x00 search-all) and a bit-packed filter payload:
+# a byte count at 0x10, then entries from 0x11. Each entry is a 5-bit tag, then
+# (for most tags) a 1-bit sort flag + 1-bit "present" flag, then the value bits.
+# Verified by round-tripping a built request back through the server's own
+# decrypt + hash-check + bit-unpack logic.
+_AHSRCH_MASK64 = 0xFFFFFFFFFFFFFFFF
+
+_AHSRCH_TCP_SEARCH_ALL = 0x00
+_AHSRCH_TCP_SEARCH     = 0x03
+
+# 5-bit entry tags (search filter types)
+_AHSRCH_SE_NAME   = 0x00
+_AHSRCH_SE_AREA   = 0x01
+_AHSRCH_SE_NATION = 0x02
+_AHSRCH_SE_JOB    = 0x03
+_AHSRCH_SE_LEVEL  = 0x04
+
+
+def _ahsrch_packbits_be(target, value, byte_off, bit_off, nbits):
+    byte_off += bit_off >> 3
+    bit_off %= 8
+    bitmask = (_AHSRCH_MASK64 >> (64 - nbits)) << bit_off
+    value = ((value << bit_off) & _AHSRCH_MASK64) & bitmask
+    bitmask ^= _AHSRCH_MASK64
+    ab = (bit_off + nbits + 7) // 8
+    data = int.from_bytes(bytes(target[byte_off:byte_off + ab]), "little")
+    data = ((data & bitmask) | value) & ((1 << (ab * 8)) - 1)
+    target[byte_off:byte_off + ab] = data.to_bytes(ab, "little")
+
+
+def _ahsrch_packbits_le(target, value, bit_off, nbits):
+    # Port of the search protocol's little-endian bit-packer. `bit_off` is an
+    # absolute bit offset into target; returns the new absolute bit offset.
+    byte_off = bit_off >> 3
+    bit_off %= 8
+    t = bit_off + nbits
+    need = 1 if t <= 8 else 2 if t <= 16 else 4 if t <= 32 else 8
+    ab = (bit_off + nbits + 7) // 8
+    m = bytearray(need)
+    for c in range(ab):
+        m[need - 1 - c] = target[byte_off + c]
+    _ahsrch_packbits_be(m, value, 0, (need << 3) - (bit_off + nbits), nbits)
+    for c in range(ab):
+        target[byte_off + c] = m[need - 1 - c]
+    return (byte_off << 3) + bit_off + nbits
+
+
+def _ahsrch_build_search_request(job=None, min_lvl=None, max_lvl=None,
+                                 areas=None, nation=None, search_all=True,
+                                 key2=b"\x00\x00\x00\x00", key_tail=None):
+    # Build a player-search request. With no filters the reply's Total is the
+    # whole-server online population; pass job=<id> for a per-job count, etc.
+    if key_tail is None:
+        key_tail = os.urandom(4)
+    pl = bytearray(48)
+    off = 0
+
+    def _entry(tag, present, descending=0):
+        nonlocal off
+        off = _ahsrch_packbits_le(pl, tag, off, 5)
+        off = _ahsrch_packbits_le(pl, descending, off, 1)
+        off = _ahsrch_packbits_le(pl, present, off, 1)
+
+    if job is not None:
+        _entry(_AHSRCH_SE_JOB, 1)
+        off = _ahsrch_packbits_le(pl, job & 0x1F, off, 5)
+    if min_lvl is not None or max_lvl is not None:
+        _entry(_AHSRCH_SE_LEVEL, 1)
+        off = _ahsrch_packbits_le(pl, (min_lvl or 0) & 0xFF, off, 8)
+        off = _ahsrch_packbits_le(pl, (max_lvl or 0) & 0xFF, off, 8)
+    if nation is not None:
+        _entry(_AHSRCH_SE_NATION, 1)
+        off = _ahsrch_packbits_le(pl, nation & 0x3, off, 2)
+    if areas:
+        for a in areas:
+            _entry(_AHSRCH_SE_AREA, 1)
+            off = _ahsrch_packbits_le(pl, a & 0x3FF, off, 10)
+        _entry(_AHSRCH_SE_AREA, 0)  # area-list terminator
+
+    nbytes = (off + 7) // 8
+    length = 76
+    if 0x11 + nbytes > length - 0x18:
+        raise ValueError("search filter payload too large (%d bytes)" % nbytes)
+    buf = bytearray(length)
+    _ahsrch_struct.pack_into("<H", buf, 0x00, length)
+    _ahsrch_struct.pack_into("<I", buf, 0x04, _AHSRCH_IXFF)
+    _ahsrch_struct.pack_into("<H", buf, 0x08, 16)
+    buf[0x0A] = 0x80
+    buf[0x0B] = _AHSRCH_TCP_SEARCH_ALL if search_all else _AHSRCH_TCP_SEARCH
+    buf[0x10] = nbytes
+    buf[0x11:0x11 + nbytes] = pl[:nbytes]
+    buf[length - 0x18:length - 0x14] = key2
+    buf[length - 0x14:length - 0x04] = _ahsrch_md5(bytes(buf[0x08:length - 0x14]))
+    buf[length - 0x04:length] = key_tail
+    P, S = _ahsrch_blowfish_init(_ahsrch_md5(_AHSRCH_KEY_SEED + key_tail))
+    _ahsrch_cipher_blocks(buf, length, P, S, decrypt=False)
+    return bytes(buf)
+
+
+def _ahsrch_parse_search_count(data, key2=b"\x00\x00\x00\x00"):
+    # Decrypt one player-search reply and return the u16 "total found" at 0x0E
+    # (the reply's type byte at 0x0B is 0x80). None on failure.
+    if len(data) < 28:
+        return None
+    buf = bytearray(data)
+    length = _ahsrch_struct.unpack_from("<H", buf, 0)[0]
+    if length < 28 or length > len(buf):
+        return None
+    P, S = _ahsrch_blowfish_init(_ahsrch_md5(
+        _AHSRCH_KEY_SEED + bytes(buf[length - 4:length]) + key2))
+    _ahsrch_cipher_blocks(buf, length, P, S, decrypt=True)
+    if buf[0x0B] != 0x80:
+        return None
+    return _ahsrch_struct.unpack_from("<H", buf, 0x0E)[0]
+
+
+def _ahsrch_query_population(host, port=_AHSRCH_PORT, timeout=8.0, **filters):
+    # Fire one broad player search and read Total from the first reply packet
+    # (every packet carries it; no need to page the record list). No filters =
+    # whole-server online population.
+    req = _ahsrch_build_search_request(**filters)
+    with socket.create_connection((host, port), timeout=timeout) as s:
+        s.settimeout(timeout)
+        s.sendall(req)
+        data = _ahsrch_recv_packet(s, timeout)
+    return _ahsrch_parse_search_count(data)
+
+
+def _ahsrch_median_price(host, item_id, stack=0, port=_AHSRCH_PORT,
+                         timeout=6.0):
+    # Median of one item's recent AH sale prices on one world (or None). This
+    # is the same history query the detail pane uses, just reduced to a median
+    # so it can be fanned out across all worlds for a price comparison.
+    try:
+        raw = _ahsrch_query_history(host, port, item_id, stack, timeout=timeout)
+        res = _ahsrch_parse_history(raw)
+    except Exception:
+        return None
+    if not res.get("ok"):
+        return None
+    prices = [s.get("price", 0) for s in res.get("sales", []) if s.get("price")]
+    if not prices:
+        return None
+    return int(statistics.median(prices))
+
+
 # --- panel glue: session-cached IP, threaded fetch, main-thread drain ---
 _ah_search_ip = None
 _ah_hist_inbox = _collections.deque()
@@ -767,15 +922,19 @@ class AHBrowser(tk.Tk):
         self._build()
         self.update_idletasks()
         self.geometry(self._ui.get("geometry", "980x620"))
+        self.after(120, self._restore_sash)
         self.bind("<Configure>", self._on_configure)
         self.tree.bind("<ButtonRelease-1>",
                        lambda e: self._schedule_ui_save(), add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._cur_id = None
+        self._pop_busy = False
         self._cat_cache = {}   # AH category -> {itemid: (singles, stacks)}
+        self._xs_cache = {}    # item_id -> [(world, median), ...] this session
         self._hist_rows = []
         self._sort_col = "date"
         self._sort_rev = True   # newest first by default
+        self.after(400, self._refresh_population)
 
     def _build(self):
         top = tk.Frame(self, bg="#1e1e28")
@@ -790,30 +949,55 @@ class AHBrowser(tk.Tk):
             side="left", padx=(16, 0))
         self.world = ttk.Combobox(top, values=_WORLDS, width=12,
                                   state="readonly")
-        self.world.set("Phoenix")
+        self.world.set(self._ui.get("world", "Phoenix"))
         self.world.pack(side="left", padx=6)
         self.world.bind("<<ComboboxSelected>>", lambda e: self._world_changed())
         tk.Label(top, text="Address:", bg="#1e1e28", fg="#dcdce6").pack(
             side="left")
         self.server = tk.Entry(top, width=16)
-        self.server.insert(0, self._servers.get("Phoenix", ""))
+        self.server.insert(0, self._servers.get(self.world.get(), ""))
         self.server.pack(side="left", padx=6)
         tk.Button(top, text="Save", command=self._save_addr).pack(
             side="left", padx=2)
         tk.Button(top, text="Detect", command=self._detect).pack(
             side="left", padx=2)
-        self.status = tk.Label(top, text=f"{len(ITEMS)} items loaded",
+        tk.Button(top, text="Default",
+                  command=self._set_default_world).pack(side="left", padx=2)
+        self.status = tk.Label(top, text="",
                                bg="#1e1e28", fg="#8a90a2")
         self.status.pack(side="right")
 
-        body = tk.PanedWindow(self, sashwidth=4, bg="#2a2a38")
+        # bottom: thin live server-population strip.
+        self.popsec = tk.Frame(self, bg="#181820")
+        self.popsec.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
+        self.pop_total_lbl = tk.Label(self.popsec, text="population \u2014",
+                                      bg="#181820", fg="#8fd39a",
+                                      font=("Segoe UI", 10))
+        self.pop_total_lbl.pack(side="left", padx=(4, 0), pady=2)
+        tk.Button(self.popsec, text="Refresh",
+                  command=self._refresh_population).pack(side="right", padx=4,
+                                                         pady=2)
+
+        body = self.body = tk.PanedWindow(self, sashwidth=4, bg="#2a2a38")
         body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        body.bind("<ButtonRelease-1>",
+                  lambda e: self._schedule_ui_save(), add="+")
 
         # left: results
         left = tk.Frame(body, bg="#1e1e28")
         self.results = tk.Listbox(left, activestyle="none", bg="#14141c",
                                   fg="#c8cede", highlightthickness=0,
                                   selectbackground="#33415c", width=34)
+        # cross-server median-price ranking for the selected item, filling the
+        # empty results-panel space (all 16 worlds queried in parallel).
+        self.xserver = tk.Listbox(left, activestyle="none", bg="#12121a",
+                                  fg="#c8cede", highlightthickness=0, height=16,
+                                  selectbackground="#33415c",
+                                  font=("Consolas", 9))
+        self.xserver.pack(side="bottom", fill="x")
+        self.xs_lbl = tk.Label(left, text="", bg="#1e1e28", fg="#8a90a2",
+                               anchor="w", font=("Segoe UI", 8))
+        self.xs_lbl.pack(side="bottom", fill="x", padx=2, pady=(4, 1))
         self.results.pack(fill="both", expand=True)
         self.results.bind("<<ListboxSelect>>", lambda e: self._pick())
         self.results.bind("<Button-3>", self._results_rightclick)
@@ -874,9 +1058,12 @@ class AHBrowser(tk.Tk):
         self.server.delete(0, "end")
         self.server.insert(0, addr)
         self._cat_cache = {}          # listings are per-server; drop stale cache
-        self.status.config(
-            text=("%s: %s" % (w, addr)) if addr
-            else "%s: no address yet -- type it and Save" % w)
+        # server/address already show in the toolbar; don't repeat them here.
+        if addr:
+            self.status.config(text="")
+            self._refresh_population()
+        else:
+            self.status.config(text="%s: no address yet -- type it and Save" % w)
         # if an item is up and this world has an address, re-pull it live
         if self._cur_id is not None and addr:
             self._refresh_current()
@@ -904,6 +1091,50 @@ class AHBrowser(tk.Tk):
             self.after(0, _apply)
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _current_host(self):
+        # Prefer the address box; fall back to the world map / auto-detect.
+        ip = self.server.get().strip()
+        return ip or _ahsrch_resolve_host(self.world.get())
+
+    def _refresh_population(self):
+        if getattr(self, "_pop_busy", False):
+            return
+        world = self.world.get()
+        host = self._current_host()
+        if not host:
+            self.pop_total_lbl.config(text="%s \u2014 no address" % world,
+                                      fg="#d39a9a")
+            return
+        self._pop_busy = True
+        self.pop_total_lbl.config(text="%s \u2014 querying\u2026" % world,
+                                  fg="#8a90a2")
+
+        def _worker():
+            try:
+                total = _ahsrch_query_population(host)
+            except Exception:
+                total = None
+
+            def _apply():
+                self._pop_busy = False
+                if total is None:
+                    self.pop_total_lbl.config(text="%s \u2014 no reply" % world,
+                                              fg="#d39a9a")
+                else:
+                    self.pop_total_lbl.config(
+                        text="%s \u2014 %s online" % (world, format(total, ",")),
+                        fg="#8fd39a")
+            self.after(0, _apply)
+        threading.Thread(target=_worker, daemon=True).start()
+
+
+    def _set_default_world(self):
+        # remember the current world so it opens automatically next launch.
+        w = self.world.get()
+        self._ui["world"] = w
+        self._save_ui_state()
+        self.status.config(text="%s will open by default" % w)
+
     def _save_addr(self):
         w = self.world.get()
         ip = self.server.get().strip()
@@ -929,7 +1160,22 @@ class AHBrowser(tk.Tk):
         try:
             cols = {c: int(self.tree.column(c, "width"))
                     for c in ("date", "price", "seller", "buyer")}
-            _save_ui({"geometry": self.geometry(), "cols": cols})
+            state = {"geometry": self.geometry(), "cols": cols}
+            if self._ui.get("world"):
+                state["world"] = self._ui["world"]
+            try:
+                state["sash"] = int(self.body.sash_coord(0)[0])
+            except Exception:
+                pass
+            _save_ui(state)
+        except Exception:
+            pass
+
+    def _restore_sash(self):
+        # left-panel width persists across runs; default a bit wide so the
+        # cross-server header is fully readable on first launch.
+        try:
+            self.body.sash_place(0, int(self._ui.get("sash", 300)), 1)
         except Exception:
             pass
 
@@ -988,6 +1234,8 @@ class AHBrowser(tk.Tk):
         self.jobs_lbl.config(text=("Jobs:  " + js) if js else "")
         self.desc_lbl.config(text=it.get("d", ""))
         self._refresh_current()
+        self._refresh_population()
+        self._compare_servers(iid)
 
     def _refresh_current(self):
         iid = self._cur_id
@@ -1057,6 +1305,54 @@ class AHBrowser(tk.Tk):
         else:
             self.hist_lbl.config(text="Auction history  —  no data / no answer")
 
+    def _compare_servers(self, iid):
+        # Fan the item's median-price query out across every world with a known
+        # address, in parallel, and rank cheapest -> priciest in the left panel.
+        cached = self._xs_cache.get(iid)
+        if cached is not None:
+            self._render_xservers(iid, cached)
+            return
+        worlds = [(w, self._servers.get(w)) for w in _WORLDS
+                  if self._servers.get(w)]
+        if not worlds:
+            return
+        self.xserver.delete(0, "end")
+        self.xs_lbl.config(text="comparing %d servers\u2026" % len(worlds))
+
+        def _worker():
+            import concurrent.futures as _cf
+            results = []
+            try:
+                with _cf.ThreadPoolExecutor(max_workers=len(worlds)) as ex:
+                    fut = {ex.submit(_ahsrch_median_price, ip, iid): w
+                           for w, ip in worlds}
+                    for f in _cf.as_completed(fut):
+                        try:
+                            med = f.result()
+                        except Exception:
+                            med = None
+                        if med is not None:
+                            results.append((fut[f], med))
+            except Exception:
+                pass
+            results.sort(key=lambda t: t[1])
+            self._xs_cache[iid] = results
+            self.after(0, lambda: self._render_xservers(iid, results))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_xservers(self, iid, results):
+        if iid != self._cur_id:
+            return   # user moved to another item; drop stale result
+        self.xserver.delete(0, "end")
+        if not results:
+            self.xs_lbl.config(text="no single-sale history on any server")
+            return
+        self.xs_lbl.config(text="median price by server (singles, cheapest first)")
+        for world, med in results:
+            self.xserver.insert("end", " %-13s %13s g" % (world, format(med, ",")))
+        self.xserver.itemconfig(0, fg="#8fd39a")                 # cheapest
+        self.xserver.itemconfig(len(results) - 1, fg="#e39a9a")  # priciest
+
     def _load_history(self, iid):
         host = self.server.get().strip()
         w = self.world.get()
@@ -1105,6 +1401,18 @@ class AHBrowser(tk.Tk):
         self._hist_rows = rows
         self._onsale = onsale
         self._render_rows()
+
+
+def _ahsrch_resolve_host(arg=None):
+    # Resolve a server argument: an explicit IPv4, a world name (from the saved
+    # server map), else auto-detect from this PC's TCP table, else the default.
+    if arg:
+        if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", arg):
+            return arg
+        for name, ip in _load_servers().items():
+            if name.lower() == arg.lower():
+                return ip
+    return _ahsrch_find_server() or _DEFAULT_SERVER
 
 
 def main():
